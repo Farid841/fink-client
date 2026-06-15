@@ -96,15 +96,20 @@ def _fix_spark_schema(schema: dict) -> dict:
 
 def _get_ai_schema(kafka_config: dict, feed_topic: str, maxtimeout: float):
     """Return parsed Avro schema for the feed topic, with Spark union fix applied."""
-    raw = get_schema_from_stream(kafka_config, feed_topic, maxtimeout)
-    if raw is None:
+    consumer = confluent_kafka.Consumer(kafka_config)
+    consumer.subscribe(["{}_schema".format(feed_topic)])
+    msg = consumer.poll(maxtimeout)
+    consumer.close()
+    if msg is None:
         return None
-    # raw is already parsed by get_schema_from_stream — re-parse with the fix
-    # by extracting the original dict and re-parsing
     try:
-        return fastavro.parse_schema(_fix_spark_schema(raw))
+        raw_dict = json.loads(msg.key())
+        return fastavro.parse_schema(_fix_spark_schema(raw_dict))
     except Exception:
-        return raw
+        try:
+            return fastavro.parse_schema(json.loads(msg.key()))
+        except Exception:
+            return None
 
 
 def _flatten(d: dict, parent_key: str = "", sep: str = ".") -> dict:
@@ -150,7 +155,8 @@ def _read_predictions(kafka_config: dict, topic: str, batchsize: int, maxtimeout
                     continue
                 try:
                     rec = json.loads(msg.value())
-                except (json.JSONDecodeError, Exception):
+                except json.JSONDecodeError:
+                    _LOG.warning("Skipped malformed message (offset %s)", msg.offset())
                     continue
 
                 source = rec.get("source") or {}
@@ -257,16 +263,11 @@ def _join_and_write_ai(predictions: dict, alerts: dict, args):
             row.update({k: v for k, v in alerts[candid].items() if k != "candid"})
         rows.append(row)
 
-    all_keys = list(rows[0].keys())
-    for row in rows[1:]:
-        for k in row:
-            if k not in all_keys:
-                all_keys.append(k)
-
-    columns = {k: [row.get(k) for row in rows] for k in all_keys}
+    all_keys = list(dict.fromkeys(k for row in rows for k in row))
 
     arrays = {}
-    for k, vals in columns.items():
+    for k in all_keys:
+        vals = [row.get(k) for row in rows]
         if k == "predictions":
             arrays[k] = pa.array(vals, type=pa.list_(pa.float64()))
         else:
@@ -564,7 +565,7 @@ def transfer_(
         )
         sys.exit()
 
-    valid_prefixes = ("ftransfer", "fxmatch", _AI_TOPIC_PREFIX)
+    valid_prefixes = ("ftransfer_", "fxmatch_", _AI_TOPIC_PREFIX)
     if not args.topic.startswith(valid_prefixes):
         msg = """
 {} is not a valid topic name.
