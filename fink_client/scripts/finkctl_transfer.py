@@ -124,7 +124,7 @@ def _flatten(d: dict, parent_key: str = "", sep: str = ".") -> dict:
 
 
 def _read_predictions(kafka_config: dict, topic: str, batchsize: int, maxtimeout: float, limit, verbose: bool) -> dict:
-    """Return dict  candid → {prediction, predictions, bridge}."""
+    """Return dict  candid → list of {model, prediction}."""
     consumer = confluent_kafka.Consumer(kafka_config)
     results = {}
     try:
@@ -163,25 +163,22 @@ def _read_predictions(kafka_config: dict, topic: str, batchsize: int, maxtimeout
                 result = rec.get("result")
 
                 if isinstance(result, dict):
-                    preds = result.get("predictions") or []
-                    if not isinstance(preds, list):
-                        preds = [preds]
-                elif isinstance(result, (int, float)):
-                    preds = [result]
-                elif isinstance(result, list):
-                    preds = result
+                    pred = result.get("predictions")
                 else:
-                    preds = []
+                    pred = result
+                if isinstance(pred, list):
+                    pred = pred[0] if pred else None
 
-                preds = [float(p) if p is not None else float("nan") for p in preds]
+                pred = float(pred) if pred is not None else float("nan")
                 candid = source.get("candid")
                 if candid is not None:
-                    results[int(candid)] = {
-                        "prediction": preds[0] if preds else float("nan"),
-                        "predictions": preds,
-                        "bridge": str(rec.get("bridge") or ""),
-                    }
+                    results.setdefault(int(candid), []).append({
+                        "model": str(rec.get("bridge") or ""),
+                        "prediction": pred,
+                    })
                     n += 1
+                    if pbar.total is not None and n >= pbar.total:
+                        pbar.total = n + batchsize
                     pbar.update(1)
             if limit and n >= limit:
                 break
@@ -258,7 +255,7 @@ def _join_and_write_ai(predictions: dict, alerts: dict, args):
 
     rows = []
     for candid, pred in predictions.items():
-        row = {"candid": candid, **pred}
+        row = {"candid": candid, "model_predictions": pred}
         if candid in alerts:
             row.update({k: v for k, v in alerts[candid].items() if k != "candid"})
         rows.append(row)
@@ -268,8 +265,10 @@ def _join_and_write_ai(predictions: dict, alerts: dict, args):
     arrays = {}
     for k in all_keys:
         vals = [row.get(k) for row in rows]
-        if k == "predictions":
-            arrays[k] = pa.array(vals, type=pa.list_(pa.float64()))
+        if k == "model_predictions":
+            arrays[k] = pa.array(
+                vals, type=pa.list_(pa.struct([("model", pa.string()), ("prediction", pa.float64())]))
+            )
         else:
             try:
                 arrays[k] = pa.array(vals)
@@ -304,7 +303,7 @@ def _join_and_write_ai(predictions: dict, alerts: dict, args):
         print(f"\nDone — {len(rows):,} rows written to '{args.outdir}/'")
         print(f"Columns ({len(all_keys)}): {', '.join(all_keys[:10])}" + (" ..." if len(all_keys) > 10 else ""))
         print("\nRead your results:")
-        print(f"  import pandas as pd")
+        print("  import pandas as pd")
         print(f"  df = pd.read_parquet('{args.outdir}/', dtype_backend='pyarrow')")
 
 
