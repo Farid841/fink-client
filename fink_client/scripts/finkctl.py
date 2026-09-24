@@ -41,7 +41,9 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
     $ finkctl COMMAND -h
 
     $ finkctl COMMAND --help
-    """.format(__version__),
+    """.format(
+        __version__
+    ),
 )
 def cli():
     pass

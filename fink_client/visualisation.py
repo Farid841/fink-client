@@ -184,14 +184,16 @@ def extract_field(alert: dict, field: str, current: str, previous: str) -> np.ar
     if alert[previous] is None:
         data = np.array([alert[current][field]])
     else:
-        data = np.concatenate([
-            [alert[current][field]],
-            extract_history(alert[previous], field),
-        ])
+        data = np.concatenate(
+            [
+                [alert[current][field]],
+                extract_history(alert[previous], field),
+            ]
+        )
     return data
 
 
 if __name__ == "__main__":
-    """ Run the test suite """
+    """Run the test suite"""
 
     regular_unit_tests()
